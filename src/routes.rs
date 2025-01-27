@@ -6,10 +6,10 @@ use axum::{
     Router,
 };
 use lazy_static::lazy_static;
-use rand::seq::IteratorRandom;
+use rand::seq::IteratorRandom; // For random selection of blocked ports
 use serde_json::{json, Value};
-use std::env;
 use std::{thread::sleep, time::Duration};
+use tokio::net::TcpListener;
 use tracing::{error, info};
 
 lazy_static! {
@@ -44,7 +44,6 @@ pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResp
     ))
     .await
     .unwrap();
-
     let enable_timeout = str_to_bool(
         std::env::var(ENABLE_LATENCY_ENV_NAME)
             .unwrap_or("false".to_string())
@@ -91,6 +90,7 @@ pub async fn post_invoke_response(
     data: String,
 ) -> impl IntoResponse {
     info!("post_invoke_response was invoked");
+
     let enable_change_reponse = str_to_bool(
         std::env::var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME)
             .unwrap_or("false".to_string())
@@ -201,33 +201,25 @@ pub async fn block_tcp_ports() {
 
     let blocked_ports = std::env::var(TCP_BLOCK_PORTS_ENV_NAME)
         .unwrap_or("".to_string())
-        .split(',')
-        .filter_map(|s| s.parse::<u16>().ok())
+        .split(",")
+        .map(|x| x.parse::<u16>().unwrap())
         .collect::<Vec<u16>>();
 
-    if blocked_ports.is_empty() {
-        return;
-    }
-
     let probability = rand::random::<f64>();
-    let block_probability = 1;
+    let block_probability = 0.9;
+
     if probability < block_probability {
-        let port_to_block = blocked_ports.choose(&mut rand::thread_rng());
+        let port_to_block = blocked_ports.into_iter().choose(&mut rand::thread_rng());
+
         if let Some(port) = port_to_block {
             info!("Blocking TCP port: {}", port);
-            block_port(*port).await;
-        }
-    }
-}
-
-async fn block_port(port: u16) {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port));
-    match listener {
-        Ok(_) => {
-            info!("Successfully blocked port: {}", port);
-        }
-        Err(_) => {
-            error!("Failed to block port: {}", port);
+            let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+                .await
+                .unwrap();
+            info!("Started blocking TCP port: {}", port);
+            loop {
+                let _ = listener.accept().await;
+            }
         }
     }
 }
@@ -251,6 +243,7 @@ pub fn router(state: AppState) -> Router {
             post(post_invoke_error),
         )
         .with_state(state)
+        .route("/block-tcp", get(block_tcp_ports)) // New route to trigger the TCP blocking chaos experiment
 }
 
 fn str_to_bool(input: &str, default: bool) -> bool {
@@ -261,5 +254,116 @@ fn str_to_bool(input: &str, default: bool) -> bool {
             error!("Error: Invalid input string. Expected 'true' or 'false'.");
             default
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use std::env;
+    use std::time::Instant;
+
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_string, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn get_next_invocation_test_added_latency() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/2018-06-01/runtime/invocation/next"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let app = router(AppState {
+            runtime_api_address: mock_server.uri().replace("http://", ""),
+        });
+
+        env::set_var(ENABLE_LATENCY_ENV_NAME, "true");
+        env::set_var(LATENCY_PROBABILITY_ENV_NAME, "1.0");
+        env::set_var(LATENCY_VALUE_ENV_NAME, "2");
+
+        let start = Instant::now();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/2018-06-01/runtime/invocation/next")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!([1, 2, 3, 4])).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let duration = start.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(duration.as_secs() >= 2);
+    }
+
+    #[tokio::test]
+    async fn post_invoke_response_test_change_reposne_default_value() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/2018-06-01/runtime/invocation/1234/response"))
+            .and(body_string(DEFAULT_RESPONSE_BODY.to_string()))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let app = router(AppState {
+            runtime_api_address: mock_server.uri().replace("http://", ""),
+        });
+
+        env::set_var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME, "true");
+        env::set_var(REPONSE_PROBABILITY_ENV_NAME, "1.0");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/2018-06-01/runtime/invocation/1234/response")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // New test to check TCP blocking chaos experiment
+    #[tokio::test]
+    async fn test_tcp_blocking() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/block-tcp"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let app = router(AppState {
+            runtime_api_address: mock_server.uri().replace("http://", ""),
+        });
+
+        env::set_var(ENABLE_TCP_BLOCK_ENV_NAME, "true");
+        env::set_var(TCP_BLOCK_PORTS_ENV_NAME, "8080,8081");
+
+        // Simulate a TCP block experiment call
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/block-tcp")
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

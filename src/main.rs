@@ -1,15 +1,13 @@
-use axum::Server;
 use lambda_extension::{service_fn, Error, Extension, LambdaEvent};
 use tokio::task;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
-use std::env;
 
 mod routes;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-
+    // required to enable CloudWatch error logging by the runtime
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
@@ -21,7 +19,7 @@ async fn main() -> Result<(), Error> {
             .expect("Missing AWS_LAMBDA_RUNTIME_API!"),
     };
     debug!(
-        "Pulling AWS_LAMBDA_RUNTIME_API endpoint - {}",
+        "Pulling AWS_LAMBDA_RUNTIME_API end point - {}",
         state.runtime_api_address
     );
 
@@ -29,9 +27,9 @@ async fn main() -> Result<(), Error> {
 
     info!("Chaos extension is enabled");
 
-    routes::block_tcp_ports().await;
-
-    let server = Server::bind(&"0.0.0.0:9100".parse().unwrap()).serve(app.into_make_service());
+    // Run the server
+    let server = axum::Server::bind(&"0.0.0.0:9100".parse().unwrap())
+        .serve(app.into_make_service());
 
     task::spawn(async move {
         server.await.unwrap();
@@ -45,5 +43,6 @@ async fn main() -> Result<(), Error> {
 }
 
 async fn boot_extension(event: LambdaEvent) -> Result<(), Error> {
+    info!("Received the following Lambda event - {:?} ", event.next);
     Ok(())
 }
