@@ -76,7 +76,7 @@ jobs:
           mkdir dist
           cp "./target/lambda/extensions/$BIN_NAME" "dist/"
 
-      - uses: actions/upload-artifact@v2.2.4
+      - uses: actions/upload-artifact@v3
         with:
           name: bins-${{ matrix.target }}
           path: dist
