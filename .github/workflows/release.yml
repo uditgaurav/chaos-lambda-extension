@@ -46,13 +46,6 @@ jobs:
       - name: Install cargo lambda
         run: pip3 install cargo-lambda
 
-      # - name: Run cargo test
-      #   uses: actions-rs/cargo@v1
-      #   with:
-      #     use-cross: ${{ matrix.cross }}
-      #     command: test
-      #     args: --release --locked --target ${{ matrix.target }} -- --test-threads=1
-
       - uses: taiki-e/install-action@just
       - name: Build release binary 
         run: just build-extension release ${{ matrix.target }}
@@ -70,17 +63,36 @@ jobs:
             aarch64-linux-gnu-strip \
             ./target/lambda/extensions/$BIN_NAME
 
-      - name: Build archive
+      - name: Prepare Lambda extension package
         shell: bash
         run: |
           mkdir dist
+          # Copy the compiled binary and the bootstrap file to dist/
           cp "./target/lambda/extensions/$BIN_NAME" "dist/"
+          cp "./bootstrap" "dist/"
+          cp "./chaos-lambda-extension" "dist/"  # Copy the chaos-lambda-extension document
+
+          # Mark the bootstrap file as executable
+          chmod +x dist/bootstrap
+
+      - name: Build archive
+        shell: bash
+        run: |
+          mkdir tmp
+          mkdir dist_with_bootstrap
+
+          mv dist/* tmp/
+          mkdir dist_with_bootstrap/chaos-lambda-extension
+          mv tmp/* dist_with_bootstrap/chaos-lambda-extension/
+
+          # Ensure the 'bootstrap' is correctly included at the top level
+          tar czf dist_with_bootstrap.tar.gz -C dist_with_bootstrap chaos-lambda-extension
 
       - uses: actions/upload-artifact@v3
         with:
           name: bins-${{ matrix.target }}
-          path: dist
-  
+          path: dist_with_bootstrap.tar.gz
+
   upload-to-aws:
     name: Upload layer for ${{ matrix.region }} target ${{ matrix.target}}
     needs: [build-artifacts]
