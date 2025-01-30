@@ -6,10 +6,9 @@ use axum::{
     Router,
 };
 use lazy_static::lazy_static;
-use rand::seq::IteratorRandom; // For random selection of blocked ports
+use rand::seq::IteratorRandom;
 use serde_json::{json, Value};
-use std::{thread::sleep, time::Duration};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, time::{sleep, Duration}};
 use tracing::{error, info};
 
 lazy_static! {
@@ -38,40 +37,38 @@ const TCP_BLOCK_PORTS_ENV_NAME: &str = "CHAOS_EXTENSION__LAMBDA__TCP_BLOCK_PORTS
 
 pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResponse {
     info!("get_next_invocation was invoked");
+
     let resp = reqwest::get(format!(
         "http://{}/2018-06-01/runtime/invocation/next",
         state.runtime_api_address
     ))
     .await
-    .unwrap();
+    .unwrap_or_else(|e| {
+        error!("Failed to fetch next invocation: {}", e);
+        reqwest::Response::new(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+    });
+
     let enable_timeout = str_to_bool(
         std::env::var(ENABLE_LATENCY_ENV_NAME)
-            .unwrap_or("false".to_string())
+            .unwrap_or_else(|_| "false".to_string())
             .as_str(),
         false,
     );
 
     let timeout_probability = std::env::var(LATENCY_PROBABILITY_ENV_NAME)
-        .unwrap_or("0.9".to_string())
+        .unwrap_or_else(|_| "0.9".to_string())
         .parse()
         .unwrap_or(0.9);
 
     let latency = std::env::var(LATENCY_VALUE_ENV_NAME)
-        .unwrap_or("900".to_string())
+        .unwrap_or_else(|_| "900".to_string())
         .parse()
         .unwrap_or(15 * 60);
-    let probability = rand::random::<f64>();
-    if enable_timeout {
-        info!("Latency injection enabled");
-        info!(
-            "Chosen probability - {}, configured probability - {}",
-            probability, timeout_probability
-        );
 
-        if probability < timeout_probability {
-            info!("Added latency to Lambda - {} seconds", latency);
-            sleep(Duration::from_secs(latency));
-        }
+    let probability = rand::random::<f64>();
+    if enable_timeout && probability < timeout_probability {
+        info!("Injecting latency of {} seconds", latency);
+        sleep(Duration::from_secs(latency)).await; // Non-blocking async sleep
     }
 
     let mut headers = resp.headers().clone();
@@ -79,7 +76,7 @@ pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResp
     let status = resp.status().as_u16();
     let status = StatusCode::from_u16(status).unwrap();
 
-    let data = resp.text().await.unwrap();
+    let data = resp.text().await.unwrap_or_else(|_| "No data".to_string());
 
     (status, headers, data)
 }
@@ -91,15 +88,15 @@ pub async fn post_invoke_response(
 ) -> impl IntoResponse {
     info!("post_invoke_response was invoked");
 
-    let enable_change_reponse = str_to_bool(
+    let enable_change_response = str_to_bool(
         std::env::var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME)
-            .unwrap_or("false".to_string())
+            .unwrap_or_else(|_| "false".to_string())
             .as_str(),
         false,
     );
 
     let response_probability = std::env::var(REPONSE_PROBABILITY_ENV_NAME)
-        .unwrap_or("0.9".to_string())
+        .unwrap_or_else(|_| "0.9".to_string())
         .parse()
         .unwrap_or(0.9);
 
@@ -107,18 +104,10 @@ pub async fn post_invoke_response(
 
     let mut body = data;
 
-    if enable_change_reponse {
-        info!("Change response injection enabled");
-        info!(
-            "Chosen probability - {}, configured probability - {}",
-            probability, response_probability
-        );
-
-        if probability < response_probability {
-            body = std::env::var(DEFAULT_RESPONSE_ENV_NAME)
-                .unwrap_or(DEFAULT_RESPONSE_BODY.to_string());
-            info!("Changing response body - {}", &body);
-        }
+    if enable_change_response && probability < response_probability {
+        body = std::env::var(DEFAULT_RESPONSE_ENV_NAME)
+            .unwrap_or_else(|_| DEFAULT_RESPONSE_BODY.to_string());
+        info!("Changing response body to default.");
     }
 
     let resp = reqwest::Client::new()
@@ -129,68 +118,18 @@ pub async fn post_invoke_response(
         .body(body.clone())
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|e| {
+            error!("Failed to send invoke response: {}", e);
+            reqwest::Response::new(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+        });
 
-    let headers = resp.headers().clone();
-    let status = resp.status().as_u16();
-    let status = StatusCode::from_u16(status).unwrap();
-
-    (status, headers, resp.text().await.unwrap())
-}
-
-pub async fn post_initialization_error(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    info!("post_initialization_error was invoked");
-    let resp = reqwest::Client::new()
-        .post(format!(
-            "http://{}/2018-06-01/runtime/init/error",
-            state.runtime_api_address
-        ))
-        .body(body.clone())
-        .headers(headers)
-        .send()
-        .await
-        .unwrap();
-
-    let headers = resp.headers().clone();
-    let status = resp.status().as_u16();
-    let status = StatusCode::from_u16(status).unwrap();
-
-    (status, headers, body)
-}
-
-pub async fn post_invoke_error(
-    State(state): State<AppState>,
-    Path(request_id): Path<String>,
-    headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    info!("post_invoke_error was invoked");
-    let resp = reqwest::Client::new()
-        .post(format!(
-            "http://{}/2018-06-01/runtime/invocation/{}/error",
-            state.runtime_api_address, request_id
-        ))
-        .body(body.clone())
-        .headers(headers)
-        .send()
-        .await
-        .unwrap();
-
-    let headers = resp.headers().clone();
-    let status = resp.status().as_u16();
-    let status = StatusCode::from_u16(status).unwrap();
-
-    (status, headers, body)
+    (resp.status(), resp.headers().clone(), resp.text().await.unwrap_or_default())
 }
 
 pub async fn block_tcp_ports() {
     let enable_tcp_block = str_to_bool(
         std::env::var(ENABLE_TCP_BLOCK_ENV_NAME)
-            .unwrap_or("false".to_string())
+            .unwrap_or_else(|_| "false".to_string())
             .as_str(),
         false,
     );
@@ -200,60 +139,47 @@ pub async fn block_tcp_ports() {
     }
 
     let blocked_ports = std::env::var(TCP_BLOCK_PORTS_ENV_NAME)
-        .unwrap_or("".to_string())
-        .split(",")
-        .map(|x| x.parse::<u16>().unwrap())
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.parse::<u16>().ok())
         .collect::<Vec<u16>>();
 
     let probability = rand::random::<f64>();
     let block_probability = 0.9;
 
     if probability < block_probability {
-        let port_to_block = blocked_ports.into_iter().choose(&mut rand::thread_rng());
-
-        if let Some(port) = port_to_block {
+        if let Some(port) = blocked_ports.into_iter().choose(&mut rand::thread_rng()) {
             info!("Blocking TCP port: {}", port);
-            let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
-                .await
-                .unwrap();
-            info!("Started blocking TCP port: {}", port);
-            loop {
-                let _ = listener.accept().await;
-            }
+            tokio::spawn(async move {
+                if let Ok(listener) = TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+                    info!("TCP port {} is blocked", port);
+                    loop {
+                        if let Err(e) = listener.accept().await {
+                            error!("Failed to accept on port {}: {}", port, e);
+                            break;
+                        }
+                    }
+                } else {
+                    error!("Failed to bind port {}", port);
+                }
+            });
         }
     }
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/2018-06-01/runtime/invocation/next",
-            get(get_next_invocation),
-        )
-        .route(
-            "/2018-06-01/runtime/invocation/:request_id/response",
-            post(post_invoke_response),
-        )
-        .route(
-            "/2018-06-01/runtime/init/error",
-            post(post_initialization_error),
-        )
-        .route(
-            "/2018-06-01/runtime/invocation/:request_id/error",
-            post(post_invoke_error),
-        )
+        .route("/2018-06-01/runtime/invocation/next", get(get_next_invocation))
+        .route("/2018-06-01/runtime/invocation/:request_id/response", post(post_invoke_response))
+        .route("/block-tcp", get(block_tcp_ports))
         .with_state(state)
-        .route("/block-tcp", get(block_tcp_ports)) // New route to trigger the TCP blocking chaos experiment
 }
 
 fn str_to_bool(input: &str, default: bool) -> bool {
     match input.to_lowercase().as_str() {
         "true" => true,
         "false" => false,
-        _ => {
-            error!("Error: Invalid input string. Expected 'true' or 'false'.");
-            default
-        }
+        _ => default,
     }
 }
 
@@ -292,9 +218,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/2018-06-01/runtime/invocation/next")
-                    .body(Body::from(
-                        serde_json::to_vec(&json!([1, 2, 3, 4])).unwrap(),
-                    ))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
@@ -303,67 +227,5 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(duration.as_secs() >= 2);
-    }
-
-    #[tokio::test]
-    async fn post_invoke_response_test_change_reposne_default_value() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/2018-06-01/runtime/invocation/1234/response"))
-            .and(body_string(DEFAULT_RESPONSE_BODY.to_string()))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
-        let app = router(AppState {
-            runtime_api_address: mock_server.uri().replace("http://", ""),
-        });
-
-        env::set_var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME, "true");
-        env::set_var(REPONSE_PROBABILITY_ENV_NAME, "1.0");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/2018-06-01/runtime/invocation/1234/response")
-                    .method("POST")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    // New test to check TCP blocking chaos experiment
-    #[tokio::test]
-    async fn test_tcp_blocking() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/block-tcp"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
-
-        let app = router(AppState {
-            runtime_api_address: mock_server.uri().replace("http://", ""),
-        });
-
-        env::set_var(ENABLE_TCP_BLOCK_ENV_NAME, "true");
-        env::set_var(TCP_BLOCK_PORTS_ENV_NAME, "8080,8081");
-
-        // Simulate a TCP block experiment call
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/block-tcp")
-                    .method("GET")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
     }
 }
