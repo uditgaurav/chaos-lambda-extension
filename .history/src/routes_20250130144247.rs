@@ -8,10 +8,9 @@ use axum::{
 use lazy_static::lazy_static;
 use rand::seq::IteratorRandom;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{thread::sleep, time::Duration};
 use tokio::net::TcpListener;
-use tokio::time::sleep;
-use tracing::info;
+use tracing::{error, info};
 
 lazy_static! {
     pub static ref DEFAULT_RESPONSE_BODY: Value = json!({
@@ -64,9 +63,12 @@ pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResp
         .unwrap_or(15 * 60);
 
     let probability = rand::random::<f64>();
-    if enable_timeout && probability < timeout_probability {
-        info!("Adding {} seconds of latency", latency);
-        sleep(Duration::from_secs(latency)).await;
+    if enable_timeout {
+        info!("Latency injection enabled");
+        if probability < timeout_probability {
+            info!("Adding {} seconds of latency", latency);
+            tokio::time::sleep(Duration::from_secs(latency)).await;
+        }
     }
 
     let mut headers = resp.headers().clone();
@@ -122,22 +124,26 @@ pub async fn post_invoke_response(
     (status, headers, resp.text().await.unwrap())
 }
 
-pub async fn post_initialization_error(
-    State(state): State<AppState>,
-    body: String,
-) -> impl IntoResponse {
+pub async fn post_initialization_error(State(state): State<AppState>, body: String) -> Response {
     info!("post_initialization_error was invoked");
-    match reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(format!(
             "http://{}/2018-06-01/runtime/init/error",
             state.runtime_api_address
         ))
         .body(body.clone())
         .send()
-        .await
-    {
-        Ok(response) => (response.status(), response.text().await.unwrap()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error processing request".to_string()),
+        .await;
+
+    match resp {
+        Ok(response) => Response::builder()
+            .status(response.status())
+            .body(axum::body::Body::from(body))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from("Error processing request"))
+            .unwrap(),
     }
 }
 
@@ -145,23 +151,31 @@ pub async fn post_invoke_error(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     body: String,
-) -> impl IntoResponse {
+) -> Response {
     info!("post_invoke_error was invoked");
-    match reqwest::Client::new()
+
+    let resp = reqwest::Client::new()
         .post(format!(
             "http://{}/2018-06-01/runtime/invocation/{}/error",
             state.runtime_api_address, request_id
         ))
         .body(body.clone())
         .send()
-        .await
-    {
-        Ok(response) => (response.status(), response.text().await.unwrap()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error processing request".to_string()),
+        .await;
+
+    match resp {
+        Ok(response) => Response::builder()
+            .status(response.status())
+            .body(axum::body::Body::from(body))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::from("Error processing request"))
+            .unwrap(),
     }
 }
 
-pub async fn block_tcp_ports() -> impl IntoResponse {
+pub async fn block_tcp_ports() {
     let enable_tcp_block = str_to_bool(
         std::env::var(ENABLE_TCP_BLOCK_ENV_NAME)
             .unwrap_or("false".to_string())
@@ -170,7 +184,7 @@ pub async fn block_tcp_ports() -> impl IntoResponse {
     );
 
     if !enable_tcp_block {
-        return StatusCode::OK;
+        return;
     }
 
     let blocked_ports: Vec<u16> = std::env::var(TCP_BLOCK_PORTS_ENV_NAME)
@@ -194,8 +208,6 @@ pub async fn block_tcp_ports() -> impl IntoResponse {
             }
         }
     }
-
-    StatusCode::OK
 }
 
 pub fn router(state: AppState) -> Router {
