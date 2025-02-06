@@ -88,7 +88,7 @@ jobs:
           # Ensure the 'bootstrap' is correctly included at the top level
           tar czf dist_with_bootstrap.tar.gz -C dist_with_bootstrap chaos-lambda-extension
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: bins-${{ matrix.target }}
           path: dist_with_bootstrap.tar.gz
