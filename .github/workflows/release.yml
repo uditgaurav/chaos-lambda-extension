@@ -46,6 +46,13 @@ jobs:
       - name: Install cargo lambda
         run: pip3 install cargo-lambda
 
+      # - name: Run cargo test
+      #   uses: actions-rs/cargo@v1
+      #   with:
+      #     use-cross: ${{ matrix.cross }}
+      #     command: test
+      #     args: --release --locked --target ${{ matrix.target }} -- --test-threads=1
+
       - uses: taiki-e/install-action@just
       - name: Build release binary 
         run: just build-extension release ${{ matrix.target }}
@@ -62,25 +69,16 @@ jobs:
             rustembedded/cross:${{ matrix.target }} \
             aarch64-linux-gnu-strip \
             ./target/lambda/extensions/$BIN_NAME
-
       - name: Build archive
         shell: bash
         run: |
-          mkdir tmp
-          mkdir dist_with_bootstrap
-
-          mv dist/* tmp/
-          mkdir dist_with_bootstrap/chaos-lambda-extension
-          mv tmp/* dist_with_bootstrap/chaos-lambda-extension/
-
-          # Ensure the 'bootstrap' is correctly included at the top level
-          tar czf dist_with_bootstrap.tar.gz -C dist_with_bootstrap chaos-lambda-extension
-
-      - uses: actions/upload-artifact@v4
+          mkdir dist
+          cp "./target/lambda/extensions/$BIN_NAME" "dist/"
+      - uses: actions/upload-artifact@v3
         with:
           name: bins-${{ matrix.target }}
-          path: dist_with_bootstrap.tar.gz
-
+          path: dist
+  
   upload-to-aws:
     name: Upload layer for ${{ matrix.region }} target ${{ matrix.target}}
     needs: [build-artifacts]
@@ -142,7 +140,6 @@ jobs:
             aws lambda list-layer-versions --layer-name chaos-lambda-extension-aarch64-unknown-linux-gnu-release --region $region --query 'LayerVersions[0].LayerVersionArn' --output text | tee -a LAYERS.md
             echo "" >> LAYERS.md
           done
-
       - name: Update LAYERS.md with X86
         run: |
           set -e; echo "# X86-64" >> LAYERS.md
@@ -150,7 +147,6 @@ jobs:
             aws lambda list-layer-versions --layer-name chaos-lambda-extension-x86_64-unknown-linux-gnu-release --region $region --query 'LayerVersions[0].LayerVersionArn' --output text | tee -a LAYERS.md
             echo "" | tee -a LAYERS.md
           done
-
       - uses: stefanzweifel/git-auto-commit-action@v4
         with:
           commit_message: Update LAYERS.md
@@ -185,11 +181,9 @@ jobs:
         shell: bash
         run: |
           set -ex
-
           rm -rf tmp
           mkdir tmp
           mkdir dist
-
           for dir in bins-* ; do
               platform=${dir#"bins-"}
               pkgname=$PROJECT_NAME-$TAG-$platform
@@ -198,7 +192,6 @@ jobs:
               chmod +x tmp/$pkgname/$BIN_NAME
               tar cJf dist/$pkgname.tar.xz -C tmp $pkgname
           done
-
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:
