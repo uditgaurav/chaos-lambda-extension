@@ -63,18 +63,6 @@ jobs:
             aarch64-linux-gnu-strip \
             ./target/lambda/extensions/$BIN_NAME
 
-      - name: Prepare Lambda extension package
-        shell: bash
-        run: |
-          mkdir dist
-          # Copy the compiled binary and the bootstrap file to dist/
-          cp "./target/lambda/extensions/$BIN_NAME" "dist/"
-          cp "./bootstrap" "dist/"
-          cp "./chaos-lambda-extension" "dist/"  # Copy the chaos-lambda-extension document
-
-          # Mark the bootstrap file as executable
-          chmod +x dist/bootstrap
-
       - name: Build archive
         shell: bash
         run: |
