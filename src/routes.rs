@@ -6,17 +6,16 @@ use axum::{
     Router,
 };
 use lazy_static::lazy_static;
-use rand::seq::IteratorRandom;
+
 use serde_json::{json, Value};
 use std::{thread::sleep, time::Duration};
-use tokio::net::TcpListener;
-use tokio::spawn;
+
 use tracing::{error, info};
 
 lazy_static! {
     pub static ref DEFAULT_RESPONSE_BODY: Value = json!({
-        "statusCode": 500,
-        "body": "hello, Chaos!!!"
+    "statusCode": 500,
+    "body": "hello, Chaos!!!"
     });
 }
 
@@ -34,9 +33,6 @@ const ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME: &str =
 const REPONSE_PROBABILITY_ENV_NAME: &str = "CHAOS_EXTENSION__RESPONSE__CHANGE_RESPONSE_PROBABILITY";
 const DEFAULT_RESPONSE_ENV_NAME: &str = "CHAOS_EXTENSION__RESPONSE__DEFAULT_RESPONSE";
 
-const ENABLE_TCP_BLOCK_ENV_NAME: &str = "CHAOS_EXTENSION__LAMBDA__ENABLE_TCP_BLOCK";
-const TCP_BLOCK_PORTS_ENV_NAME: &str = "CHAOS_EXTENSION__LAMBDA__TCP_BLOCK_PORTS";
-
 pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResponse {
     info!("get_next_invocation was invoked");
     let resp = reqwest::get(format!(
@@ -45,7 +41,6 @@ pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResp
     ))
     .await
     .unwrap();
-
     let enable_timeout = str_to_bool(
         std::env::var(ENABLE_LATENCY_ENV_NAME)
             .unwrap_or("false".to_string())
@@ -62,17 +57,26 @@ pub async fn get_next_invocation(State(state): State<AppState>) -> impl IntoResp
         .unwrap_or("900".to_string())
         .parse()
         .unwrap_or(15 * 60);
-
     let probability = rand::random::<f64>();
-    if enable_timeout && probability < timeout_probability {
-        info!("Latency injection enabled: {} seconds", latency);
-        sleep(Duration::from_secs(latency)); // Blocking sleep to ensure delay
+    if enable_timeout {
+        info!("Latency injection enabled");
+        info!(
+            "Chosen probability - {}, configured probability - {}",
+            probability, timeout_probability
+        );
+
+        if probability < timeout_probability {
+            info!("Added latency to Lambda - {} seconds", latency);
+            sleep(Duration::from_secs(latency));
+        }
     }
 
     let mut headers = resp.headers().clone();
+    // Chunked respinses are causing issues.
     headers.remove("transfer-encoding");
+    let status = resp.status().as_u16();
+    let status = StatusCode::from_u16(status).unwrap();
 
-    let status = resp.status();
     let data = resp.text().await.unwrap();
 
     (status, headers, data)
@@ -84,8 +88,9 @@ pub async fn post_invoke_response(
     data: String,
 ) -> impl IntoResponse {
     info!("post_invoke_response was invoked");
+    // Send the request
 
-    let enable_change_response = str_to_bool(
+    let enable_change_reponse = str_to_bool(
         std::env::var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME)
             .unwrap_or("false".to_string())
             .as_str(),
@@ -98,12 +103,21 @@ pub async fn post_invoke_response(
         .unwrap_or(0.9);
 
     let probability = rand::random::<f64>();
+
     let mut body = data;
 
-    if enable_change_response && probability < response_probability {
-        body = std::env::var(DEFAULT_RESPONSE_ENV_NAME)
-            .unwrap_or(DEFAULT_RESPONSE_BODY.to_string());
-        info!("Changing response body: {}", &body);
+    if enable_change_reponse {
+        info!("Change response injection enabled");
+        info!(
+            "Chosen probability - {}, configured probability - {}",
+            probability, response_probability
+        );
+
+        if probability < response_probability {
+            body = std::env::var(DEFAULT_RESPONSE_ENV_NAME)
+                .unwrap_or(DEFAULT_RESPONSE_BODY.to_string());
+            info!("Changing response body - {}", &body);
+        }
     }
 
     let resp = reqwest::Client::new()
@@ -117,7 +131,8 @@ pub async fn post_invoke_response(
         .unwrap();
 
     let headers = resp.headers().clone();
-    let status = resp.status();
+    let status = resp.status().as_u16();
+    let status = StatusCode::from_u16(status).unwrap();
 
     (status, headers, resp.text().await.unwrap())
 }
@@ -133,15 +148,17 @@ pub async fn post_initialization_error(
             "http://{}/2018-06-01/runtime/init/error",
             state.runtime_api_address
         ))
-        .headers(headers)
         .body(body.clone())
+        .headers(headers)
         .send()
-        .await;
+        .await
+        .unwrap();
 
-    match resp {
-        Ok(response) => (response.status(), response.text().await.unwrap()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error processing request".to_string()),
-    }
+    let headers = resp.headers().clone();
+    let status = resp.status().as_u16();
+    let status = StatusCode::from_u16(status).unwrap();
+
+    (status, headers, body)
 }
 
 pub async fn post_invoke_error(
@@ -156,72 +173,126 @@ pub async fn post_invoke_error(
             "http://{}/2018-06-01/runtime/invocation/{}/error",
             state.runtime_api_address, request_id
         ))
-        .headers(headers)
         .body(body.clone())
+        .headers(headers)
         .send()
-        .await;
+        .await
+        .unwrap();
 
-    match resp {
-        Ok(response) => (response.status(), response.text().await.unwrap()),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error processing request".to_string()),
-    }
-}
+    let headers = resp.headers().clone();
+    let status = resp.status().as_u16();
+    let status = StatusCode::from_u16(status).unwrap();
 
-pub async fn block_tcp_ports() -> impl IntoResponse {
-    let enable_tcp_block = str_to_bool(
-        std::env::var(ENABLE_TCP_BLOCK_ENV_NAME)
-            .unwrap_or("false".to_string())
-            .as_str(),
-        false,
-    );
-
-    if !enable_tcp_block {
-        return StatusCode::OK;
-    }
-
-    let blocked_ports: Vec<u16> = std::env::var(TCP_BLOCK_PORTS_ENV_NAME)
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|x| x.parse().ok())
-        .collect();
-
-    let probability = rand::random::<f64>();
-    let block_probability = 0.9;
-
-    if probability < block_probability {
-        if let Some(port) = blocked_ports.into_iter().choose(&mut rand::thread_rng()) {
-            info!("Blocking TCP port: {}", port);
-            spawn(async move {
-                let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
-                    .await
-                    .unwrap();
-                info!("Started blocking TCP port: {}", port);
-                loop {
-                    let _ = listener.accept().await;
-                }
-            });
-        }
-    }
-
-    StatusCode::OK
+    (status, headers, body)
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/2018-06-01/runtime/invocation/next", get(get_next_invocation))
+        .route(
+            "/2018-06-01/runtime/invocation/next",
+            get(get_next_invocation),
+        )
         .route(
             "/2018-06-01/runtime/invocation/:request_id/response",
             post(post_invoke_response),
         )
-        .route("/2018-06-01/runtime/init/error", post(post_initialization_error))
+        .route(
+            "/2018-06-01/runtime/init/error",
+            post(post_initialization_error),
+        )
         .route(
             "/2018-06-01/runtime/invocation/:request_id/error",
             post(post_invoke_error),
         )
-        .route("/block-tcp", get(block_tcp_ports))
         .with_state(state)
 }
-
 fn str_to_bool(input: &str, default: bool) -> bool {
-    matches!(input.to_lowercase().as_str(), "true") || default
+    match input.to_lowercase().as_str() {
+        "true" => true,
+        "false" => false,
+        _ => {
+            error!("Error: Invalid input string. Expected 'true' or 'false'.");
+            default
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use std::env;
+    use std::time::Instant;
+
+    use tower::ServiceExt;
+    use wiremock::matchers::{body_string, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn get_next_invocation_test_added_latency() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/2018-06-01/runtime/invocation/next"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let app = router(AppState {
+            runtime_api_address: mock_server.uri().replace("http://", ""),
+        });
+
+        env::set_var(ENABLE_LATENCY_ENV_NAME, "true");
+        env::set_var(LATENCY_PROBABILITY_ENV_NAME, "1.0");
+        env::set_var(LATENCY_VALUE_ENV_NAME, "2");
+
+        let start = Instant::now();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/2018-06-01/runtime/invocation/next")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!([1, 2, 3, 4])).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let duration = start.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(duration.as_secs() >= 2);
+    }
+
+    #[tokio::test]
+    async fn post_invoke_response_test_change_reposne_default_value() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            // .and(body_json(DEFAULT_RESPONSE_BODY.to_string()))
+            .and(path("/2018-06-01/runtime/invocation/1234/response"))
+            .and(body_string(DEFAULT_RESPONSE_BODY.to_string()))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        let app = router(AppState {
+            runtime_api_address: mock_server.uri().replace("http://", ""),
+        });
+
+        env::set_var(ENABLE_CHANGE_RESPONSE_BODY_ENV_NAME, "true");
+        env::set_var(REPONSE_PROBABILITY_ENV_NAME, "1.0");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/2018-06-01/runtime/invocation/1234/response")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

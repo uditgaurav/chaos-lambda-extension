@@ -1,4 +1,5 @@
 use lambda_extension::{service_fn, Error, Extension, LambdaEvent};
+
 use tokio::task;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -10,7 +11,9 @@ async fn main() -> Result<(), Error> {
     // required to enable CloudWatch error logging by the runtime
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        // disable printing the name of the module in every log line.
         .with_target(false)
+        // disabling time is handy because CloudWatch will add the ingestion time.
         .without_time()
         .init();
 
@@ -26,10 +29,9 @@ async fn main() -> Result<(), Error> {
     let app = routes::router(state);
 
     info!("Chaos extension is enabled");
-
-    // Run the server
-    let server = axum::Server::bind(&"0.0.0.0:9100".parse().unwrap())
-        .serve(app.into_make_service());
+    // run it
+    let server =
+        axum::Server::bind(&"0.0.0.0:9100".parse().unwrap()).serve(app.into_make_service());
 
     task::spawn(async move {
         server.await.unwrap();
